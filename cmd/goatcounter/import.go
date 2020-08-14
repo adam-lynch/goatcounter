@@ -21,8 +21,10 @@ import (
 	"zgo.at/goatcounter"
 	"zgo.at/goatcounter/cfg"
 	"zgo.at/goatcounter/handlers"
+	"zgo.at/goatcounter/logscan"
 	"zgo.at/json"
 	"zgo.at/zdb"
+	"zgo.at/zhttp"
 	"zgo.at/zli"
 	"zgo.at/zlog"
 	"zgo.at/zstd/zint"
@@ -30,21 +32,28 @@ import (
 )
 
 const usageImport = `
-Import pageviews from an export
+Import pageviews from an export or logfile.
 
-You must give one filename to import; use - to read from stdin:
+Overview:
 
-    $ goatcounter import export.csv.gz
+    You must give one filename to import; use - to read from stdin:
 
-This requires a running GoatCounter instance; it's a front-end for the API
-rather than a tool to modify the database directly. If you're running this on
-the same machine the data will be fetched from the DB and a temporary API key
-will be created.
+        $ goatcounter import export.csv.gz
 
-Or use an URL in -site if you want to send data to another instance:
+    Or to read from a log file:
 
-    $ export API_KEY=[..]
-    $ goatcounter import -site https://stats.example.com
+        $ goatcounter import -follow /var/log/nginx/access.log
+
+    This requires a running GoatCounter instance; it's a front-end for the API
+    rather than a tool to modify the database directly. If you add an ID or site
+    code as the -site flag an API key can be generated automatically, but this
+    requires access to the database.
+
+    Alternatively, use an URL in -site if you want to send data to a remote
+    instance:
+
+        $ export GOATCOUNTER_API_KEY=..
+        $ goatcounter import -site https://stats.example.com
 
 Flags:
 
@@ -56,13 +65,32 @@ Flags:
 
   -silent      Don't show progress information.
 
-  -site        Site to import to, not needed if there is only one site, as an ID
-               ("1"), code ("example"), or an URL ("https://stats.example.com").
-               You must set GOATCOUNTER_API_KEY if you use an URL.
+  -site        Site to import to, can be passed as an ID ("1") or site code
+               ("example") if you have access to the database. Can be omitted if there's only
+               one site in the db.
 
-  -format      File format; currently accepted values:
+               Use an URL ("https://stats.example.com") to send data to a remote
+               instance; this requires setting GOATCOUNTER_API_KEY.
 
-                   csv   GoatCounter CSV export (default)
+  -follow      Watch a file for new lines and import them. Existing lines are
+               not processed.
+
+  -format      Log format; currently accepted values:
+
+                   csv         GoatCounter CSV export (default)
+                   combined    NCSA Combined Log
+                   combined-v  NCSA Combined Log with virtual host
+                   common      Common Log Format (CLF)
+                   common-v    Common Log Format (CLF) with virtual host
+                   log:[fmt]   Custom log format; see "goatcounter help logfile"
+                               for details on the format.
+
+  -date, -time, -datetime
+               Format of date and time for log imports; set automatically when
+               using one of the predefined log formats and only needs to be set
+               when using a custom log:[..]".
+               This follows Go's time format; see "goatcounter help logfile" for
+               an overview on how this works.
 
 Environment:
 
@@ -70,7 +98,77 @@ Environment:
                         must have "count" permission.
 `
 
-var silent bool
+// w3c         W3C
+// squid       Squid native log format
+// aws-cf      AWS Amazon CloudFront (Download Distribution)
+// aws-el      AWS Elastic Load Balancing
+// aws-s3      AWS Amazon Simple Storage Service (S3)
+// gcs         Google Cloud Storage
+// virtualmin  Virtualmin Log Format with Virtual Host
+// k8s-nginx   Kubernetes Nginx Ingress Log Format
+
+const helpLogfile = `
+Format specifiers are given as $name.
+
+List of format specifiers:
+
+    ignore         Ignore zero or more characters.
+
+    time           Time according to the -time value.
+    date           Date according to -date value.
+    datetime       Date and time according to -datetime value.
+
+    remote_addr    Client remote address; IPv4 or IPv6 address (DNS names are
+                   not supported here).
+    xff            Client remote address from X-Forwarded-For header field. The
+                   remote address will be set to the last non-private IP
+                   address.
+
+    method         Request method.
+    status         Status code sent to the client.
+    http           HTTP request protocol (i.e. HTTP/1.1).
+    path           URL path; this may contain the query string.
+    query          Query string; only needed if not included in $path.
+    referrer       "Referrer" request header.
+    user_agent     User-Agent request header.
+
+Some format specifiers that are not (yet) used anywhere:
+
+    host           Server name of the server serving the request.
+    timing_sec     Time to serve the request in seconds, with possible decimal.
+    timing_milli   Time to serve the request in milliseconds.
+    timing_micro   Time to serve the request in microseconds.
+    size           Size of the object returned to the client.
+
+Date and time parsing:
+
+    Parsing the date and time is done with Go's time package; instead of
+
+Mon Jan 2 15:04:05 MST 2006
+
+        2006
+        1, 01
+        2, 02
+        3, 03, 15
+        4, 04
+        5, 05
+        .000000000
+        MST, -0700
+
+    Some special values:
+
+        ANSIC       = "Mon Jan _2 15:04:05 2006"
+        UnixDate    = "Mon Jan _2 15:04:05 MST 2006"
+        RFC822      = "02 Jan 06 15:04 MST"
+        RFC822Z     = "02 Jan 06 15:04 -0700"
+        RFC850      = "Monday, 02-Jan-06 15:04:05 MST"
+        RFC1123     = "Mon, 02 Jan 2006 15:04:05 MST"
+        RFC1123Z    = "Mon, 02 Jan 2006 15:04:05 -0700"
+        RFC3339     = "2006-01-02T15:04:05Z07:00"
+        RFC3339Nano = "2006-01-02T15:04:05.999999999Z07:00"
+
+the full documentation is available at https://pkg.go.dev/time
+`
 
 func importCmd() (int, error) {
 	// So it uses https URLs in site.URL()
@@ -81,10 +179,15 @@ func importCmd() (int, error) {
 	dbConnect := flagDB()
 	debug := flagDebug()
 
-	var format, siteFlag string
+	var format, siteFlag, date, time, datetime string
+	var silent, follow bool
 	CommandLine.StringVar(&siteFlag, "site", "", "")
 	CommandLine.StringVar(&format, "format", "csv", "")
 	CommandLine.BoolVar(&silent, "silent", false, "")
+	CommandLine.BoolVar(&follow, "follow", false, "")
+	CommandLine.StringVar(&date, "date", "", "")
+	CommandLine.StringVar(&time, "time", "", "")
+	CommandLine.StringVar(&datetime, "datetime", "", "")
 	err := CommandLine.Parse(os.Args[2:])
 	if err != nil {
 		return 1, err
@@ -98,16 +201,11 @@ func importCmd() (int, error) {
 		return 1, fmt.Errorf("can only specify one filename")
 	}
 
-	var fp io.ReadCloser
-	if files[0] == "-" {
-		fp = ioutil.NopCloser(os.Stdin)
-	} else {
-		fp, err = os.Open(files[0])
-		if err != nil {
-			return 1, err
-		}
-		defer fp.Close()
+	fp, err := zli.InputOrFile(files[0], silent)
+	if err != nil {
+		return 1, err
 	}
+	defer fp.Close()
 
 	zlog.Config.SetDebug(*debug)
 
@@ -119,25 +217,99 @@ func importCmd() (int, error) {
 		defer clean()
 	}
 
-	var n int
-	switch format {
-	default:
-		return 1, fmt.Errorf("unknown -format value: %q", format)
-	case "csv":
-		n, err = importCSV(fp, url, key)
+	// Import from CSV.
+	if format == "csv" {
+		if follow {
+			return 1, fmt.Errorf("cannot use -follow with -format=csv")
+		}
+		n, err := importCSV(fp, url, key, silent)
+		if err != nil {
+			var gErr *errors.Group
+			if errors.As(err, &gErr) {
+				return 1, fmt.Errorf("%d errors", gErr.Len())
+			}
+			return 1, err
+		}
+
+		if !silent {
+			zli.EraseLine()
+			fmt.Printf("Done! Imported %d rows\n", n)
+		}
+		return 0, nil
+	}
+
+	// Assume log file for everything else.
+	var scan *logscan.Scanner
+	if follow && files[0] != "-" {
+		fp.Close()
+		scan, err = logscan.NewFollow(files[0], format, date, time, datetime)
+	} else {
+		scan, err = logscan.New(fp, format, date, time, datetime)
 	}
 	if err != nil {
-		var gErr *errors.Group
-		if errors.As(err, &gErr) {
-			return 1, fmt.Errorf("%d errors", gErr.Len())
-		}
 		return 1, err
 	}
 
-	if !silent {
-		zli.EraseLine()
-		fmt.Printf("Done! Imported %d rows\n", n)
+	hits := make([]handlers.APICountRequestHit, 0, 100)
+	for {
+		data, err := scan.Line()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 1, err
+		}
+
+		hit := handlers.APICountRequestHit{
+			Path:      data.Path(),
+			Ref:       data.Referrer(),
+			Query:     data.Query(),
+			UserAgent: data.UserAgent(),
+		}
+
+		hit.CreatedAt, err = data.Datetime()
+		if err != nil {
+			zlog.Error(err)
+			continue
+		}
+
+		if data.XForwardedFor() != "" {
+			xffSplit := strings.Split(data.XForwardedFor(), ",")
+			for i := len(xffSplit) - 1; i >= 0; i-- {
+				if !zhttp.PrivateIP(xffSplit[i]) {
+					hit.IP = zhttp.RemovePort(strings.TrimSpace(xffSplit[i]))
+					break
+				}
+			}
+		}
+		if hit.IP == "" {
+			hit.IP = zhttp.RemovePort(data.RemoteAddr())
+		}
+
+		hits = append(hits, hit)
+
+		if len(hits) == 100 {
+			// TODO: limit goroutines here
+			go func(hits []handlers.APICountRequestHit) {
+				defer zlog.Recover()
+
+				err := importSend(url, key, silent, hits)
+				if err != nil {
+					zlog.Error(err)
+				}
+			}(hits)
+
+			hits = make([]handlers.APICountRequestHit, 0, 100)
+		}
 	}
+
+	if len(hits) > 0 {
+		err := importSend(url, key, silent, hits)
+		if err != nil {
+			zlog.Error(err)
+		}
+	}
+
 	return 0, nil
 }
 
@@ -156,7 +328,7 @@ func newRequest(method, url, key string, body io.Reader) (*http.Request, error) 
 	return r, nil
 }
 
-func importSend(url, key string, hits []handlers.APICountRequestHit) error {
+func importSend(url, key string, silent bool, hits []handlers.APICountRequestHit) error {
 	body, err := json.Marshal(handlers.APICountRequest{Hits: hits})
 	if err != nil {
 		return err
@@ -222,7 +394,7 @@ func importSend(url, key string, hits []handlers.APICountRequestHit) error {
 	return nil
 }
 
-func importCSV(fp io.Reader, url, key string) (int, error) {
+func importCSV(fp io.Reader, url, key string, silent bool) (int, error) {
 	c := csv.NewReader(fp)
 	header, err := c.Read()
 	if err != nil {
@@ -288,7 +460,7 @@ func importCSV(fp io.Reader, url, key string) (int, error) {
 			Session:   hit.Session.String(),
 		})
 		if len(hits) >= 100 {
-			if errs.Append(importSend(url, key, hits)) {
+			if errs.Append(importSend(url, key, silent, hits)) {
 				if !silent {
 					zli.Errorf(err)
 				}
@@ -298,7 +470,7 @@ func importCSV(fp io.Reader, url, key string) (int, error) {
 		n++
 	}
 	if len(hits) > 0 {
-		errs.Append(importSend(url, key, hits))
+		errs.Append(importSend(url, key, silent, hits))
 	}
 
 	return n, errs.ErrorOrNil()

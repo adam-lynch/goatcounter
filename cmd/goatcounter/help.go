@@ -33,7 +33,7 @@ func help() (int, error) {
 			"help", "version",
 			"migrate", "create", "serve",
 			"reindex", "monitor",
-			"db", "listen",
+			"db", "listen", "logfile",
 		} {
 			head := fmt.Sprintf("─── Help for %q ", h)
 			fmt.Fprintf(stdout, "%s%s\n\n",

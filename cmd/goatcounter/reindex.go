@@ -29,16 +29,16 @@ have to run this in normal usage.
 
 This command may take a while to run on larger sites.
 
-Avoiding race conditions
+You need to be a little bit careful to avoid race conditions with this. It's
+fine to update older data since goatcounter never writes to it, but updating the
+current day may result in problems.
 
-    You need to be a little bit careful to avoid race conditions with this. It's
-    fine to update older data since goatcounter never writes to it, but updating
-    the current day may result in:
+1. GoatCounter reads data from DB, processes it, updates the DB.
+2. In the meanwhile reindex updated the data in the DB, so the data from step 1
+   is wrong.
 
-    1. GoatCounter reads data from DB, processes it, updates the DB.
-    2. In the meanwhile reindex updated the data in the DB.
-
-    Generally speaking, it's best to not run this while GoatCounter is running.
+Generally speaking, it's best to not run this while GoatCounter is running for
+the current day.
 
 Flags:
 

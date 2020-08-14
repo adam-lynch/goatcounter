@@ -23,6 +23,7 @@ require (
 	honnef.co/go/tools v0.0.1-2020.1.6
 	zgo.at/blackmail v0.0.0-20200703094839-f1e44ef1dbb8
 	zgo.at/errors v0.0.0-20200725175708-8255739ad6ec
+	zgo.at/follow v0.0.0-20200726141605-9139f5fe5857
 	zgo.at/gadget v0.0.0-20200522205438-64412137d778
 	zgo.at/guru v1.1.0
 	zgo.at/isbot v0.0.0-20201022032147-22da657c7bcf
@@ -36,5 +37,6 @@ require (
 	zgo.at/zpack v1.0.1
 	zgo.at/zstd v0.0.0-20201024225707-4c755aa12c16
 	zgo.at/zstripe v1.0.0
+	zgo.at/ztest v0.0.0-20200526130303-f59d60374e72
 	zgo.at/zvalidate v0.0.0-20200611174908-64a702efab5a
 )

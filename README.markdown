@@ -75,6 +75,18 @@ Features
   ~7M statically compiled binary. The only other thing you need is a SQLite
   database file or PostgreSQL connection (no way around that).
 
+Getting data in to GoatCounter
+------------------------------
+
+There are three ways:
+
+1. Add the JavaScript code on your site.
+
+2. Integrate in your middleware.
+
+3. Parse logfiles.
+
+
 Running your own
 ----------------
 

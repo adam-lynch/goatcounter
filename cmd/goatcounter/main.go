@@ -46,6 +46,7 @@ var usage = map[string]string{
 	"database": helpDatabase,
 	"db":       helpDatabase,
 	"listen":   helpListen,
+	"logfile":  helpLogfile,
 
 	"version": `
 Show version and build information. This is printed as key=value, separated by
@@ -66,7 +67,7 @@ Commands:
   migrate      Run database migrations.
   create       Create a new site and user.
   serve        Start HTTP server.
-  import       Import pageviews from export.
+  import       Import pageviews from an export or logfile.
 
 Advanced commands:
   reindex      Recreate the index tables (*_stats, *_count) from the hits.
@@ -75,6 +76,7 @@ Advanced commands:
 
 Extra help topics:
   listen       Detailed documentation on -listen, -tls.
+  logfile      Documentation on importing from logfiles.
 
 See "help <topic>" for more details for the command.
 `
